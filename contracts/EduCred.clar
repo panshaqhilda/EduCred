@@ -77,3 +77,127 @@
         (err err-not-found)
     )
 )
+
+
+
+(define-public (revoke-credential (student principal) (credential-id uint))
+    (let (
+        (credential (unwrap! (get-credential student credential-id) err-not-found))
+    )
+        (asserts! (is-eq tx-sender (get university credential)) err-not-authorized)
+        (ok (map-set credentials 
+            {student: student, credential-id: credential-id}
+            (merge credential {valid: false})
+        ))
+    )
+)
+
+
+(define-public (update-university-name (new-name (string-ascii 50)))
+    (let (
+        (university (unwrap! (get-university tx-sender) err-not-found))
+    )
+        (ok (map-set universities 
+            tx-sender
+            (merge university {name: new-name})
+        ))
+    )
+)
+
+
+
+(define-public (update-university-verification (verified bool))
+    (let (
+        (university (unwrap! (get-university tx-sender) err-not-found))
+    )
+        (ok (map-set universities 
+            tx-sender
+            (merge university {verified: verified})
+        ))
+    )
+)
+
+
+(define-public (update-credential (student principal) (credential-id uint) (course-name (string-ascii 100)))
+    (let (
+        (credential (unwrap! (get-credential student credential-id) err-not-found))
+    )
+        (asserts! (is-eq tx-sender (get university credential)) err-not-authorized)
+        (ok (map-set credentials 
+            {student: student, credential-id: credential-id}
+            (merge credential {course: course-name})
+        ))
+    )
+)
+
+
+(define-map credential-metadata
+    {credential-id: uint, student: principal}
+    {
+        grade: (string-ascii 2),
+        description: (string-ascii 500),
+        duration: uint
+    }
+)
+
+(define-public (add-credential-metadata 
+    (student principal) 
+    (credential-id uint)
+    (grade (string-ascii 2))
+    (description (string-ascii 500))
+    (duration uint)
+)
+    (let (
+        (credential (unwrap! (get-credential student credential-id) err-not-found))
+    )
+        (asserts! (is-eq tx-sender (get university credential)) err-not-authorized)
+        (ok (map-set credential-metadata
+            {credential-id: credential-id, student: student}
+            {grade: grade, description: description, duration: duration}
+        ))
+    )
+)
+
+
+(define-map student-profiles
+    principal
+    {
+        name: (string-ascii 50),
+        email: (string-ascii 100),
+        registration-date: uint
+    }
+)
+
+(define-public (register-student-profile 
+    (name (string-ascii 50))
+    (email (string-ascii 100))
+)
+    (ok (map-set student-profiles
+        tx-sender
+        {
+            name: name,
+            email: email,
+            registration-date: stacks-block-height
+        }
+    ))
+)
+
+
+
+
+(define-private (issue-single-credential (student principal) (course-name (string-ascii 100)))
+    (let (
+        (next-id (default-to u0 (get-credential-count tx-sender)))
+    )
+        (map-set credentials
+            {student: student, credential-id: (+ next-id u1)}
+            {
+                university: tx-sender,
+                course: course-name,
+                issue-date: stacks-block-height,
+                valid: true
+            }
+        )
+        (map-set credential-counter tx-sender (+ next-id u1))
+        true
+    ))
