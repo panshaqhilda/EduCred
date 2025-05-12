@@ -434,3 +434,92 @@
         ))
     )
 )
+
+
+(define-map credential-access-grants
+    {credential-id: uint, granted-to: principal}
+    {
+        granted-by: principal,
+        grant-date: uint,
+        expiry-date: uint,
+        access-type: (string-ascii 10)
+    }
+)
+
+(define-public (grant-credential-access
+    (credential-id uint)
+    (viewer principal)
+    (duration uint)
+    (access-type (string-ascii 10))
+)
+    (let (
+        (credential (unwrap! (get-credential tx-sender credential-id) err-not-found))
+    )
+        (ok (map-set credential-access-grants
+            {credential-id: credential-id, granted-to: viewer}
+            {
+                granted-by: tx-sender,
+                grant-date: stacks-block-height,
+                expiry-date: (+ stacks-block-height duration),
+                access-type: access-type
+            }
+        ))
+    )
+)
+
+(define-read-only (check-credential-access 
+    (credential-id uint)
+    (viewer principal)
+)
+    (match (map-get? credential-access-grants {credential-id: credential-id, granted-to: viewer})
+        access-grant (ok (< stacks-block-height (get expiry-date access-grant)))
+        (err err-not-authorized)
+    )
+)
+
+
+(define-map credential-templates
+    {template-id: uint, university: principal}
+    {
+        name: (string-ascii 100),
+        description: (string-ascii 500),
+        required-fields: (list 10 (string-ascii 50)),
+        validity-period: uint,
+        renewable: bool
+    }
+)
+
+(define-map template-counter principal uint)
+
+(define-public (create-credential-template
+    (template-name (string-ascii 100))
+    (template-description (string-ascii 500))
+    (fields (list 10 (string-ascii 50)))
+    (validity uint)
+    (is-renewable bool)
+)
+    (let (
+        (university (unwrap! (get-university tx-sender) err-not-authorized))
+        (template-id (default-to u0 (map-get? template-counter tx-sender)))
+    )
+        (asserts! (get verified university) err-not-authorized)
+        (map-set template-counter tx-sender (+ template-id u1))
+        (ok (map-set credential-templates
+            {template-id: (+ template-id u1), university: tx-sender}
+            {
+                name: template-name,
+                description: template-description,
+                required-fields: fields,
+                validity-period: validity,
+                renewable: is-renewable
+            }
+        ))
+    )
+)
+
+(define-read-only (get-credential-template 
+    (template-id uint)
+    (university principal)
+)
+    (map-get? credential-templates {template-id: template-id, university: university})
+)
