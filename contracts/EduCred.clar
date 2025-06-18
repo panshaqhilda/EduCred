@@ -5,6 +5,71 @@
 (define-constant err-already-registered (err u101))
 (define-constant err-not-found (err u102))
 
+
+
+(define-map skill-registry
+    {skill-id: uint}
+    {
+        name: (string-ascii 50),
+        category: (string-ascii 30),
+        description: (string-ascii 200),
+        created-by: principal,
+        verification-required: bool
+    }
+)
+
+(define-map student-skills
+    {student: principal, skill-id: uint}
+    {
+        proficiency-level: uint,
+        verified: bool,
+        verified-by: principal,
+        verification-date: uint,
+        evidence-credential: (optional uint)
+    }
+)
+
+(define-map skill-portfolios
+    principal
+    {
+        public: bool,
+        last-updated: uint,
+        total-skills: uint,
+        verified-skills: uint
+    }
+)
+
+(define-map employer-profiles
+    principal
+    {
+        company-name: (string-ascii 100),
+        verified: bool,
+        registration-date: uint
+    }
+)
+
+(define-map skill-searches
+    {search-id: uint, employer: principal}
+    {
+        required-skills: (list 5 uint),
+        minimum-proficiency: uint,
+        search-date: uint,
+        active: bool
+    }
+)
+
+(define-map skill-endorsements
+    {student: principal, skill-id: uint, endorser: principal}
+    {
+        endorsement-date: uint,
+        endorsement-type: (string-ascii 20),
+        comments: (string-ascii 150)
+    }
+)
+
+(define-data-var skill-id-counter uint u0)
+(define-data-var search-id-counter uint u0)
+
 ;; Data Maps
 (define-map universities 
     principal 
@@ -522,4 +587,241 @@
     (university principal)
 )
     (map-get? credential-templates {template-id: template-id, university: university})
+)
+
+(define-public (register-skill
+    (skill-name (string-ascii 50))
+    (skill-category (string-ascii 30))
+    (skill-description (string-ascii 200))
+    (requires-verification bool)
+)
+    (let (
+        (new-skill-id (+ (var-get skill-id-counter) u1))
+    )
+        (var-set skill-id-counter new-skill-id)
+        (ok (map-set skill-registry
+            {skill-id: new-skill-id}
+            {
+                name: skill-name,
+                category: skill-category,
+                description: skill-description,
+                created-by: tx-sender,
+                verification-required: requires-verification
+            }
+        ))
+    )
+)
+
+(define-public (add-student-skill
+    (skill-id uint)
+    (proficiency uint)
+    (credential-id (optional uint))
+)
+    (let (
+        (skill (unwrap! (map-get? skill-registry {skill-id: skill-id}) err-not-found))
+        (current-portfolio (default-to 
+            {public: false, last-updated: u0, total-skills: u0, verified-skills: u0}
+            (map-get? skill-portfolios tx-sender)
+        ))
+    )
+        (asserts! (<= proficiency u5) (err u104))
+        (map-set student-skills
+            {student: tx-sender, skill-id: skill-id}
+            {
+                proficiency-level: proficiency,
+                verified: false,
+                verified-by: tx-sender,
+                verification-date: stacks-block-height,
+                evidence-credential: credential-id
+            }
+        )
+        (ok (map-set skill-portfolios
+            tx-sender
+            (merge current-portfolio {
+                last-updated: stacks-block-height,
+                total-skills: (+ (get total-skills current-portfolio) u1)
+            })
+        ))
+    )
+)
+
+(define-public (verify-student-skill
+    (student principal)
+    (skill-id uint)
+    (verified-proficiency uint)
+)
+    (let (
+        (student-skill (unwrap! (map-get? student-skills {student: student, skill-id: skill-id}) err-not-found))
+        (skill (unwrap! (map-get? skill-registry {skill-id: skill-id}) err-not-found))
+        (verifier-university (unwrap! (get-university tx-sender) err-not-authorized))
+        (current-portfolio (default-to 
+            {public: false, last-updated: u0, total-skills: u0, verified-skills: u0}
+            (map-get? skill-portfolios student)
+        ))
+    )
+        (asserts! (get verified verifier-university) err-not-authorized)
+        (asserts! (<= verified-proficiency u5) (err u104))
+        (map-set student-skills
+            {student: student, skill-id: skill-id}
+            (merge student-skill {
+                proficiency-level: verified-proficiency,
+                verified: true,
+                verified-by: tx-sender,
+                verification-date: stacks-block-height
+            })
+        )
+        (ok (map-set skill-portfolios
+            student
+            (merge current-portfolio {
+                last-updated: stacks-block-height,
+                verified-skills: (+ (get verified-skills current-portfolio) u1)
+            })
+        ))
+    )
+)
+
+(define-public (register-employer
+    (company-name (string-ascii 100))
+)
+    (ok (map-set employer-profiles
+        tx-sender
+        {
+            company-name: company-name,
+            verified: false,
+            registration-date: stacks-block-height
+        }
+    ))
+)
+
+(define-public (verify-employer
+    (employer principal)
+)
+    (let (
+        (employer-profile (unwrap! (map-get? employer-profiles employer) err-not-found))
+    )
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (ok (map-set employer-profiles
+            employer
+            (merge employer-profile {verified: true})
+        ))
+    )
+)
+
+(define-public (create-skill-search
+    (required-skills (list 5 uint))
+    (min-proficiency uint)
+)
+    (let (
+        (employer (unwrap! (map-get? employer-profiles tx-sender) err-not-authorized))
+        (new-search-id (+ (var-get search-id-counter) u1))
+    )
+        (asserts! (get verified employer) err-not-authorized)
+        (asserts! (<= min-proficiency u5) (err u104))
+        (var-set search-id-counter new-search-id)
+        (ok (map-set skill-searches
+            {search-id: new-search-id, employer: tx-sender}
+            {
+                required-skills: required-skills,
+                minimum-proficiency: min-proficiency,
+                search-date: stacks-block-height,
+                active: true
+            }
+        ))
+    )
+)
+
+(define-public (set-portfolio-visibility
+    (is-public bool)
+)
+    (let (
+        (current-portfolio (default-to 
+            {public: false, last-updated: u0, total-skills: u0, verified-skills: u0}
+            (map-get? skill-portfolios tx-sender)
+        ))
+    )
+        (ok (map-set skill-portfolios
+            tx-sender
+            (merge current-portfolio {
+                public: is-public,
+                last-updated: stacks-block-height
+            })
+        ))
+    )
+)
+
+(define-public (endorse-skill
+    (student principal)
+    (skill-id uint)
+    (endorsement-type (string-ascii 20))
+    (endorsement-comments (string-ascii 150))
+)
+    (let (
+        (student-skill (unwrap! (map-get? student-skills {student: student, skill-id: skill-id}) err-not-found))
+    )
+        (ok (map-set skill-endorsements
+            {student: student, skill-id: skill-id, endorser: tx-sender}
+            {
+                endorsement-date: stacks-block-height,
+                endorsement-type: endorsement-type,
+                comments: endorsement-comments
+            }
+        ))
+    )
+)
+
+(define-read-only (get-skill-info
+    (skill-id uint)
+)
+    (map-get? skill-registry {skill-id: skill-id})
+)
+
+(define-read-only (get-student-skill
+    (student principal)
+    (skill-id uint)
+)
+    (map-get? student-skills {student: student, skill-id: skill-id})
+)
+
+(define-read-only (get-student-portfolio
+    (student principal)
+)
+    (map-get? skill-portfolios student)
+)
+
+(define-read-only (get-employer-profile
+    (employer principal)
+)
+    (map-get? employer-profiles employer)
+)
+
+(define-read-only (get-skill-search
+    (search-id uint)
+    (employer principal)
+)
+    (map-get? skill-searches {search-id: search-id, employer: employer})
+)
+
+(define-read-only (get-skill-endorsement
+    (student principal)
+    (skill-id uint)
+    (endorser principal)
+)
+    (map-get? skill-endorsements {student: student, skill-id: skill-id, endorser: endorser})
+)
+
+(define-read-only (check-portfolio-visibility
+    (student principal)
+)
+    (match (map-get? skill-portfolios student)
+        portfolio (ok (get public portfolio))
+        (ok false)
+    )
+)
+
+(define-read-only (get-current-skill-id)
+    (ok (var-get skill-id-counter))
+)
+
+(define-read-only (get-current-search-id)
+    (ok (var-get search-id-counter))
 )
