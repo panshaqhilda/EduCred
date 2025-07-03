@@ -6,6 +6,45 @@
 (define-constant err-not-found (err u102))
 
 
+(define-constant err-insufficient-approvals (err u105))
+(define-constant err-duplicate-approval (err u106))
+(define-constant err-approval-not-found (err u107))
+(define-constant err-invalid-threshold (err u108))
+
+(define-map credential-approval-configs
+    {university: principal, credential-type: (string-ascii 50)}
+    {
+        required-approvals: uint,
+        authorized-signers: (list 10 principal),
+        approval-window: uint,
+        active: bool
+    }
+)
+
+(define-map pending-credential-approvals
+    {approval-id: uint, university: principal}
+    {
+        student: principal,
+        course-name: (string-ascii 100),
+        credential-type: (string-ascii 50),
+        request-date: uint,
+        expiry-date: uint,
+        approvals-received: uint,
+        approvals-required: uint,
+        status: (string-ascii 20)
+    }
+)
+
+(define-map credential-approvals
+    {approval-id: uint, approver: principal}
+    {
+        approval-date: uint,
+        comments: (string-ascii 200),
+        signature-hash: (string-ascii 64)
+    }
+)
+
+(define-map approval-id-counter principal uint)
 
 (define-map skill-registry
     {skill-id: uint}
@@ -727,6 +766,200 @@
                 active: true
             }
         ))
+    )
+)
+
+
+(define-public (configure-approval-requirements
+    (credential-type (string-ascii 50))
+    (required-approvals uint)
+    (authorized-signers (list 10 principal))
+    (approval-window uint)
+)
+    (let (
+        (university (unwrap! (get-university tx-sender) err-not-authorized))
+    )
+        (asserts! (get verified university) err-not-authorized)
+        (asserts! (and (>= required-approvals u1) (<= required-approvals u10)) err-invalid-threshold)
+        (asserts! (>= approval-window u1) err-invalid-threshold)
+        (ok (map-set credential-approval-configs
+            {university: tx-sender, credential-type: credential-type}
+            {
+                required-approvals: required-approvals,
+                authorized-signers: authorized-signers,
+                approval-window: approval-window,
+                active: true
+            }
+        ))
+    )
+)
+
+(define-public (request-credential-approval
+    (student principal)
+    (course-name (string-ascii 100))
+    (credential-type (string-ascii 50))
+)
+    (let (
+        (university (unwrap! (get-university tx-sender) err-not-authorized))
+        (config (unwrap! (map-get? credential-approval-configs {university: tx-sender, credential-type: credential-type}) err-not-found))
+        (approval-id (+ (default-to u0 (map-get? approval-id-counter tx-sender)) u1))
+        (expiry-date (+ stacks-block-height (get approval-window config)))
+    )
+        (asserts! (get verified university) err-not-authorized)
+        (asserts! (get active config) err-not-authorized)
+        (map-set approval-id-counter tx-sender approval-id)
+        (ok (map-set pending-credential-approvals
+            {approval-id: approval-id, university: tx-sender}
+            {
+                student: student,
+                course-name: course-name,
+                credential-type: credential-type,
+                request-date: stacks-block-height,
+                expiry-date: expiry-date,
+                approvals-received: u0,
+                approvals-required: (get required-approvals config),
+                status: "pending"
+            }
+        ))
+    )
+)
+
+(define-public (approve-credential-request
+    (approval-id uint)
+    (university principal)
+    (approval-comments (string-ascii 200))
+    (signature-hash (string-ascii 64))
+)
+    (let (
+        (config (unwrap! (map-get? credential-approval-configs {university: university, credential-type: "default"}) err-not-found))
+        (pending-approval (unwrap! (map-get? pending-credential-approvals {approval-id: approval-id, university: university}) err-not-found))
+        (existing-approval (map-get? credential-approvals {approval-id: approval-id, approver: tx-sender}))
+    )
+        (asserts! (is-none existing-approval) err-duplicate-approval)
+        (asserts! (is-some (index-of (get authorized-signers config) tx-sender)) err-not-authorized)
+        (asserts! (< stacks-block-height (get expiry-date pending-approval)) err-not-found)
+        (asserts! (is-eq (get status pending-approval) "pending") err-not-found)
+        (map-set credential-approvals
+            {approval-id: approval-id, approver: tx-sender}
+            {
+                approval-date: stacks-block-height,
+                comments: approval-comments,
+                signature-hash: signature-hash
+            }
+        )
+        (let (
+            (new-approval-count (+ (get approvals-received pending-approval) u1))
+            (updated-pending (merge pending-approval {approvals-received: new-approval-count}))
+        )
+            (map-set pending-credential-approvals
+                {approval-id: approval-id, university: university}
+                updated-pending
+            )
+            (if (>= new-approval-count (get approvals-required pending-approval))
+                (begin
+                    (map-set pending-credential-approvals
+                        {approval-id: approval-id, university: university}
+                        (merge updated-pending {status: "approved"})
+                    )
+                    (ok {approved: true, ready-to-issue: true})
+                )
+                (ok {approved: true, ready-to-issue: false})
+            )
+        )
+    )
+)
+
+(define-public (issue-approved-credential
+    (approval-id uint)
+)
+    (let (
+        (pending-approval (unwrap! (map-get? pending-credential-approvals {approval-id: approval-id, university: tx-sender}) err-not-found))
+        (university (unwrap! (get-university tx-sender) err-not-authorized))
+        (next-credential-id (default-to u0 (get-credential-count tx-sender)))
+    )
+        (asserts! (get verified university) err-not-authorized)
+        (asserts! (is-eq (get status pending-approval) "approved") err-insufficient-approvals)
+        (asserts! (>= (get approvals-received pending-approval) (get approvals-required pending-approval)) err-insufficient-approvals)
+        (map-set credentials
+            {student: (get student pending-approval), credential-id: (+ next-credential-id u1)}
+            {
+                university: tx-sender,
+                course: (get course-name pending-approval),
+                issue-date: stacks-block-height,
+                valid: true
+            }
+        )
+        (map-set credential-counter tx-sender (+ next-credential-id u1))
+        (map-set pending-credential-approvals
+            {approval-id: approval-id, university: tx-sender}
+            (merge pending-approval {status: "issued"})
+        )
+        (ok {credential-id: (+ next-credential-id u1), issued: true})
+    )
+)
+
+(define-public (reject-credential-request
+    (approval-id uint)
+    (university principal)
+    (rejection-reason (string-ascii 200))
+)
+    (let (
+        (config (unwrap! (map-get? credential-approval-configs {university: university, credential-type: "default"}) err-not-found))
+        (pending-approval (unwrap! (map-get? pending-credential-approvals {approval-id: approval-id, university: university}) err-not-found))
+    )
+        (asserts! (is-some (index-of (get authorized-signers config) tx-sender)) err-not-authorized)
+        (asserts! (is-eq (get status pending-approval) "pending") err-not-found)
+        (ok (map-set pending-credential-approvals
+            {approval-id: approval-id, university: university}
+            (merge pending-approval {status: "rejected"})
+        ))
+    )
+)
+
+(define-read-only (get-approval-config
+    (university principal)
+    (credential-type (string-ascii 50))
+)
+    (map-get? credential-approval-configs {university: university, credential-type: credential-type})
+)
+
+(define-read-only (get-pending-approval
+    (approval-id uint)
+    (university principal)
+)
+    (map-get? pending-credential-approvals {approval-id: approval-id, university: university})
+)
+
+(define-read-only (get-approval-details
+    (approval-id uint)
+    (approver principal)
+)
+    (map-get? credential-approvals {approval-id: approval-id, approver: approver})
+)
+
+(define-read-only (check-approval-eligibility
+    (approval-id uint)
+    (university principal)
+    (potential-approver principal)
+)
+    (match (map-get? credential-approval-configs {university: university, credential-type: "default"})
+        config (ok (is-some (index-of (get authorized-signers config) potential-approver)))
+        (err err-not-found)
+    )
+)
+
+(define-read-only (get-approval-progress
+    (approval-id uint)
+    (university principal)
+)
+    (match (map-get? pending-credential-approvals {approval-id: approval-id, university: university})
+        pending-approval (ok {
+            approvals-received: (get approvals-received pending-approval),
+            approvals-required: (get approvals-required pending-approval),
+            status: (get status pending-approval),
+            expires-at: (get expiry-date pending-approval)
+        })
+        (err err-not-found)
     )
 )
 
